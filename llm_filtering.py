@@ -10,12 +10,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 # CONFIG
 SAMPLE_CSV_PATH = "notebooks/csv/clean_sample_for_llm_shortReadme.csv"
-OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_Qwen_2026317.csv"
+OUTPUT_CSV = "notebooks/data/sample_agent_repos_llm_filtered_withShortReadme_DeepSeekR1.csv"
 FEW_SHOT_JSON = "notebooks/data/few_shot_examples_shortReadme_binaryClass.json"
 
-MODEL =  "Qwen/Qwen3-4B" #"Qwen/Qwen3-14B" #"Qwen/Qwen3-30B-A3B-Thinking-2507" #"Qwen/Qwen3-8B"   #"Qwen/Qwen3-4B"                 
+MODEL =  "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
 CACHE_DIR = os.path.expanduser("~/hf_cache")
-MAX_NEW_TOKENS = 100  # short enough for JSON output
+MAX_NEW_TOKENS = 1500  # short enough for JSON output
 
 # Device
 if torch.cuda.is_available():
@@ -46,7 +46,7 @@ model = AutoModelForCausalLM.from_pretrained(
     MODEL,
     cache_dir=CACHE_DIR,
     device_map=device_map,
-    torch_dtype=torch_dtype,
+    dtype=torch_dtype,
     trust_remote_code=True
 )
 
@@ -104,8 +104,19 @@ IMPORTANT: Your task is to classify the repository into ONE of the following cat
 2. other
 
 Instructions: 
-• Analyze the repository using **description** and **topics**. Only use the README if the description is unclear.
-• Choose ONLY ONE category.
+• A repository is "llm-based agentic system" ONLY if it is a standalone agent application 
+  that is built using a Large Language Model (LLM)
+• A repository is "other" if it is ANY of the following but not limited to 
+  - A framework or library to build agents (e.g. LangChain, AutoGPT framework)
+  - A benchmark or evaluation tool for LLM agents
+  - A foundation or base model (e.g. model weights, pretraining code)
+  - A dataset for training or evaluating agents
+  - A tutorial, guide, or educational resource about LLM agents
+  - A curated list or collection of papers, tools, or agent projects
+  - An infrastructure or DevOps tool that manages or scales LLMs
+  - A Reinforcement Learning agent that controls LLM infrastructure 
+    (the LLM is NOT the agent itself in this case)
+• Analyze the repository using **name**, **description**, **topics** and **readme**. 
 • Do NOT create new categories.
 • Do NOT write any explanations, reasoning, or extra text.
 
@@ -149,15 +160,19 @@ Output format:
                 **inputs,
                 max_new_tokens=MAX_NEW_TOKENS,
                 do_sample=False,
-                temperature=0.0,
                 eos_token_id=tokenizer.eos_token_id,
                 pad_token_id=tokenizer.pad_token_id
             )
 
+        
         generated_tokens = outputs[0][inputs["input_ids"].shape[1]:]
         decoded = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
-        #print("Decoded LLM output:", decoded)
+        print("Raw LLM output:", decoded)
+
+        decoded = re.sub(r"<think>.*?</think>", "", decoded, flags=re.DOTALL).strip()
+        
+        print("Decoded LLM output:", decoded)
 
     except Exception as e:
         print("Generation error:", e)
