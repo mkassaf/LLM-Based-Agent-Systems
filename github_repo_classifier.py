@@ -2,14 +2,16 @@
 github_repo_classifier.py
 
 Classifies GitHub repos from a CSV into binary categories using DeepSeek-R1
-via mlx-lm. All metadata is read directly from the CSV — no GitHub API calls.
+via mlx-lm. Metadata is fetched live from the GitHub GraphQL API and used
+both for pre-filtering and for enriching the LLM prompt.
 
 Categories:
   llm-based agentic system — executable autonomous multi-step LLM agent
   other                    —  tutorial, demo, framework, or non-agentic
 
 Setup:
-  python github_repo_classifier.py
+  1. Copy .env.example to .env and set GITHUB_TOKEN.
+  2. python github_repo_classifier.py
 
 Key settings are at the top of the CONFIG block below.
 """
@@ -20,8 +22,13 @@ import os
 import re
 
 import pandas as pd
+from dotenv import load_dotenv
 from mlx_lm import load, generate
 from tqdm import tqdm
+
+from github_repo_fetcher import fetch_repo_metadata
+
+load_dotenv()
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 INPUT_CSV  = "notebooks/data/clean_sample_agent_repos_withShortReadme_manual.csv"
@@ -126,6 +133,23 @@ def _clean(val) -> str:
 
 _AGENTIC_NAME_WORDS = {"agent", "agents", "agentic", "autonomous"}
 
+
+def _metadata_skip(meta: dict) -> str | None:
+    """Return a skip reason if GitHub metadata fails quality thresholds, else None."""
+    if meta.get("stars", 0) < 10:
+        return f"stars={meta['stars']} < 10"
+    if meta.get("commit_count", 0) < 2:
+        return f"commits={meta['commit_count']} < 2"
+    if meta.get("number_of_contributors", 0) < 2:
+        return f"contributors={meta['number_of_contributors']} < 2"
+    if not meta.get("license"):
+        return "no license"
+    last_updated = str(meta.get("last_updated", ""))
+    if not last_updated.startswith("2026"):
+        return f"last updated {last_updated[:10]!r} — not in 2026"
+    return None
+
+
 def should_skip(row) -> str | None:
     desc    = _clean(row.get("description"))
     snippet = _clean(row.get("readme_snippet"))
@@ -176,16 +200,20 @@ def extract_category_fallback(text: str) -> str | None:
     return None
 
 
-def build_user_content(row) -> str:
+def build_user_content(row, meta: dict | None = None) -> str:
     snippet = str(row.get("readme_snippet", "") or "").strip()
+    # Prefer live metadata over CSV columns when available
+    m = meta or {}
     lines = [
         f"repo:         {row['full_name']}",
         f"description:  {row.get('description', '') or '(none)'}",
         f"topics:       {row.get('topics', '') or '(none)'}",
-        f"language:     {row.get('primary_language', '') or row.get('language', '') or '(none)'}",
-        f"license:      {row.get('license', '') or '(none)'}",
-        f"stars: {row.get('stars', 0)}  forks: {row.get('forks', 0)}  watchers: {row.get('watchers_count', 0)}",
-        f"created: {str(row.get('created_at', ''))[:10] or '?'}  last_updated: {str(row.get('last_updated', ''))[:10] or '?'}",
+        f"language:     {m.get('primary_language') or row.get('primary_language', '') or row.get('language', '') or '(none)'}",
+        f"license:      {m.get('license') or row.get('license', '') or '(none)'}",
+        f"stars: {m.get('stars', row.get('stars', 0))}  forks: {m.get('forks', row.get('forks', 0))}",
+        f"commits: {m.get('commit_count', '?')}  contributors: {m.get('number_of_contributors', '?')}",
+        f"created: {str(m.get('created_at', row.get('created_at', '')))[:10] or '?'}"
+        f"  last_updated: {str(m.get('last_updated', row.get('last_updated', '')))[:10] or '?'}",
     ]
     if snippet:
         lines.append(f'readme_snippet:\n"""\n{snippet[:800]}\n"""')
@@ -298,14 +326,38 @@ if __name__ == "__main__":
             print(f"\n[{full_name}]")
 
             try:
+                # ── 1. Fetch live metadata from GitHub ────────────────────────
+                print("  Fetching GitHub metadata...")
+                meta = fetch_repo_metadata(full_name)
+                if meta is None:
+                    print("  Could not fetch metadata — skipping.")
+                    writer.writerow({"full_name": full_name,
+                                     **_error_result("github fetch failed")})
+                    csvfile.flush()
+                    continue
+
+                # ── 2. Quality pre-filter (metadata thresholds) ───────────────
+                meta_skip = _metadata_skip(meta)
+                if meta_skip:
+                    print(f"  Skipped (quality): {meta_skip}")
+                    writer.writerow({"full_name": full_name,
+                                     "category": "other", "confidence": 0.0,
+                                     "key_evidence": "[]",
+                                     "reasoning": f"skipped: {meta_skip}"})
+                    csvfile.flush()
+                    continue
+
+                # ── 3. Content pre-filter (description / readme) ──────────────
                 skip_reason = should_skip(row)
                 if skip_reason:
-                    print(f"  Skipped: {skip_reason}")
+                    print(f"  Skipped (content): {skip_reason}")
                     result = {"category": "other", "confidence": 0.0,
-                              "key_evidence": "[]", "reasoning": f"skipped: {skip_reason}"}
+                              "key_evidence": "[]",
+                              "reasoning": f"skipped: {skip_reason}"}
                 else:
                     print("  Classifying...")
-                    result = classify(row)
+                    result = classify(row, meta)
+
             except Exception as e:
                 print(f"  Unexpected error: {e}")
                 result = _error_result(f"unexpected error: {e}")
